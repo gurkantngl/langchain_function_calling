@@ -1,12 +1,14 @@
 import streamlit as st
 import os
+import json
+import logging
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.agents import AgentAction, AgentFinish
-import logging
 
 # Import tools from chatbot.py
 from chatbot import get_order_status, update_user_email, schedule_appointment, find_nearest_store
@@ -27,19 +29,47 @@ def main():
     @st.cache_resource
     def load_agent_executor():
         tools = [get_order_status, update_user_email, schedule_appointment, find_nearest_store]
+        
+        # Sistem talimatlarını güncelleyerek daha net yönlendirmeler ekliyorum
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "Sen müşteri hizmetleri taleplerini karşılayan bir asistansın. Uygun aracı çağırarak kullanıcıya yardımcı ol."),
+            ("system", """Sen müşteri hizmetleri taleplerini karşılayan bir asistansın. Uygun aracı çağırarak kullanıcıya yardımcı ol.
+
+Fonksiyon çağırma kuralları:
+- Sipariş durumu sorularında get_order_status kullan
+- E-posta güncelleme için update_user_email kullan
+- Randevu oluşturma için schedule_appointment kullan. Yarın = bugünün tarihi + 1 gün olarak hesaplanır
+- En yakın mağaza sorguları için find_nearest_store kullan ve lokasyon olarak şehir adı belirt
+- Kullanıcının lokasyonu yoksa veya "Your Current Location" çağrısı yapıyorsan, bunun yerine lokasyon için kullanıcıdan bilgi iste
+
+Tarih formatı her zaman YYYY-MM-DD olarak kullan (örn: 2023-05-15).
+Geçersiz bir yanıt verme ve her zaman Türkçe konuş."""),
             MessagesPlaceholder(variable_name="chat_history", optional=True),
             ("human", "{input}"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
-        llm = ChatGroq(model="llama3-8b-8192", groq_api_key=groq_api_key)
+
+        # Groq modelini yapılandır ve hata durumuna karşı koruma ekle
+        try:
+            llm = ChatGroq(
+                model="llama3-8b-8192", 
+                groq_api_key=groq_api_key,
+                temperature=0.1,  # Daha kararlı yanıtlar için düşük sıcaklık
+                max_tokens=4000,   # Yeterli token sayısı
+                request_timeout=30, # Zaman aşımı süresi (saniye)
+            )
+        except Exception as e:
+            logging.error(f"LLM yapılandırılırken hata: {e}")
+            st.error(f"Model yüklenirken hata oluştu: {e}")
+            st.stop()
+
+        # Parsing hatalarına karşı koruma ile agent oluştur
         agent = create_tool_calling_agent(llm, tools, prompt)
         agent_executor = AgentExecutor(
             agent=agent,
-            tools=tools,
-            verbose=False,
+            tools=tools, 
+            verbose=False,  # Üretim ortamında verbose kapatılabilir
             handle_parsing_errors=True,
+            max_iterations=3,  # Sonsuz döngü riskini azaltmak için
             return_intermediate_steps=True
         )
         return agent_executor
@@ -106,26 +136,58 @@ def main():
         # Get assistant response
         with st.chat_message("assistant"):
             message_placeholder = st.empty() # Placeholder for final response
+            loading_text = "Yanıt hazırlanıyor..."
+            message_placeholder.markdown(loading_text)
 
             try:
                 logging.info(f"Kullanıcı girdisi: {prompt}")
-                # Invoke the agent - use the last user message and the history
-                # We need to pop the last user message from history before passing
-                if chat_history_for_agent and isinstance(chat_history_for_agent[-1], HumanMessage):
-                     input_for_agent = chat_history_for_agent.pop().content
+                
+                # Yarın için tarihi hesapla (randevu işlemleri için)
+                tomorrow = datetime.now() + timedelta(days=1)
+                tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+                
+                # "Yarın" kelimesinin geçtiği durumlarda tarih dönüşümünü önceden yapalım
+                if "yarın" in prompt.lower():
+                    enhanced_prompt = prompt.lower().replace("yarın", f"yarın ({tomorrow_str})")
+                    logging.info(f"Prompt geliştirildi, yarın tarihi eklendi: {enhanced_prompt}")
                 else:
-                     input_for_agent = prompt
-
+                    enhanced_prompt = prompt
+                
                 # Invoke the agent and get intermediate steps
-                result = agent_executor.invoke({
-                    "input": input_for_agent,
-                    "chat_history": chat_history_for_agent
-                })
-
+                if chat_history_for_agent and isinstance(chat_history_for_agent[-1], HumanMessage):
+                    input_for_agent = chat_history_for_agent.pop().content
+                else:
+                    input_for_agent = enhanced_prompt
+                
+                # Agent'i çağır ve maksimum 2 deneme yap
+                retry_count = 0
+                max_retries = 2
+                last_error = None
+                
+                while retry_count <= max_retries:
+                    try:
+                        # İlk denemede enhanced_prompt, sonraki denemelerde daha açık talimatlar kullan
+                        current_input = input_for_agent if retry_count == 0 else f"{input_for_agent} (Lütfen bu talebi düzgün bir şekilde işle ve geçerli argümanlarla fonksiyonu çağır. Yarın tarihi bugün + 1 gündür: {tomorrow_str})"
+                        
+                        result = agent_executor.invoke({
+                            "input": current_input,
+                            "chat_history": chat_history_for_agent
+                        })
+                        
+                        # Başarılı çağrıyla döngüyü kır
+                        break
+                    except Exception as e:
+                        last_error = str(e)
+                        logging.warning(f"Agent çağrısı hatası (Deneme {retry_count+1}/{max_retries+1}): {e}")
+                        retry_count += 1
+                        
+                        # Son denemedeysek ve hala hata varsa, hatayı fırlatmaya devam et
+                        if retry_count > max_retries:
+                            raise e
+                
                 # --- Display Intermediate Steps ---
                 if "intermediate_steps" in result and result["intermediate_steps"]:
-                    # Use st.expander for a collapsible view of steps
-                    with st.expander("⚙️ Agent Çalışma Adımları", expanded=True):
+                    with st.expander("⚙️ Agent Çalışma Adımları", expanded=False):
                         for step in result["intermediate_steps"]:
                             # Ensure step is a tuple (AgentAction, observation)
                             if isinstance(step, tuple) and len(step) == 2:
@@ -134,32 +196,56 @@ def main():
                                     tool = action.tool
                                     tool_input = action.tool_input
                                     st.markdown(f"**🛠️ Araç Çağrıldı:** `{tool}`")
-                                    st.markdown(f"**📥 Parametreler:**")
-                                    st.json(tool_input, expanded=False) # Keep parameters collapsed initially
+                                    
+                                    try:
+                                        if isinstance(tool_input, str):
+                                            tool_input_dict = json.loads(tool_input)
+                                        else:
+                                            tool_input_dict = tool_input
+                                        st.json(tool_input_dict, expanded=False)
+                                    except:
+                                        st.code(f"{tool_input}")
+                                        
                                     st.markdown(f"**🔍 Araç Sonucu:**")
-                                    st.json(observation, expanded=False) # Keep results collapsed initially
-                                    st.divider() # Add a separator between steps
+                                    try:
+                                        if isinstance(observation, (dict, list)):
+                                            st.json(observation, expanded=False)
+                                        else:
+                                            st.code(f"{observation}")
+                                    except:
+                                        st.write(f"{observation}")
+                                    st.divider()
                                 else:
                                     st.write("Beklenmeyen adım formatı (action):", action)
                             else:
-                                 st.write("Beklenmeyen adım formatı (step):", step)
-
+                                st.write("Beklenmeyen adım formatı (step):", step)
 
                 # --- Final Response ---
                 full_response = result.get('output', "Üzgünüm, bir yanıt oluşturamadım.")
                 logging.info(f"Agent yanıtı: {full_response}")
+                message_placeholder.markdown(full_response)
 
             except Exception as e:
                 logging.exception(f"Agent çağrılırken hata oluştu. Kullanıcı girdisi: {prompt}")
-                full_response = "Üzgünüm, isteğinizi işlerken bir sorun oluştu. Lütfen tekrar deneyin veya farklı bir şekilde sorun."
-                st.error(full_response + f" (Detay: {e})")
-                # Ensure error message is displayed even if steps fail
-                message_placeholder.markdown(full_response) # Display error in the main placeholder
+                
+                # Kullanıcı dostu hata mesajı
+                if "Failed to call a function" in str(e):
+                    error_message = """Özür dilerim, randevunuzu oluştururken bir sorun yaşadım. 
+                    
+Lütfen talebinizi şu şekilde belirtin:
+- Hangi hizmet için randevu istediğinizi belirtin (örn: "servis randevusu")
+- Tarihi açık bir şekilde belirtin (örn: "yarın" veya "23 Mayıs")
+- Saati belirtin (örn: "14:00")
 
-
-            # Display the final response *after* the intermediate steps expander
-            message_placeholder.markdown(full_response)
-
+Örnek: "Yarın saat 14:00'te telefon tamiri için randevu almak istiyorum."
+                    """
+                elif "Your Current Location" in str(e):
+                    error_message = "Özür dilerim, konumunuzu belirtmediğiniz için size en yakın mağazayı bulamadım. Lütfen bulunduğunuz şehir veya semti belirtin. Örnek: 'Ankara'da en yakın mağazanız nerede?'"
+                else:
+                    error_message = f"Üzgünüm, isteğinizi işlerken bir sorun oluştu. Lütfen farklı bir şekilde sorunuzu ifade eder misiniz?"
+                
+                message_placeholder.markdown(error_message)
+                full_response = error_message
 
         # Add assistant response to chat history (even if it's an error message)
         st.session_state.messages.append({"role": "assistant", "content": full_response})
