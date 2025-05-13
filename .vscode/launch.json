@@ -1,0 +1,18 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Flask Uygulaması",
+            "type": "python",
+            "request": "launch",
+            "module": "local_deep_research.web.app",
+            "env": {
+                "FLASK_APP": "local_deep_research.web.app",
+                "FLASK_DEBUG": "1"
+            },
+            "args": [],
+            "jinja": true,
+            "justMyCode": true
+        }
+    ]
+} 

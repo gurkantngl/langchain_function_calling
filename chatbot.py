@@ -102,7 +102,7 @@ def schedule_appointment(service_type: Optional[str] = None,
         if not preferred_time:
             preferred_time = "09:00"
             
-        # Mock başarılı yanıt
+        # Mock başarılı yanıt - şimdi gerçek tarihi kullanıyor
         result = {
             "success": True, 
             "appointment_id": "APT" + datetime.datetime.now().strftime("%Y%m%d%H%M%S"),

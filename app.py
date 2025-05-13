@@ -30,6 +30,33 @@ def main():
     def load_agent_executor():
         tools = [get_order_status, update_user_email, schedule_appointment, find_nearest_store]
         
+        # Bugün, yarın ve hafta günleri için tarih hesapla
+        today = datetime.now()
+        
+        # Bugün ve yarın için tarih formatı
+        today_str = today.strftime("%Y-%m-%d")
+        tomorrow = today + timedelta(days=1)
+        tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+        
+        # Hafta günleri için tarih hesaplama
+        current_weekday = today.weekday()  # 0: Pazartesi, 1: Salı, ..., 6: Pazar
+        
+        weekdays = {
+            "pazartesi": (0 - current_weekday) % 7 or 7,
+            "salı": (1 - current_weekday) % 7 or 7,
+            "çarşamba": (2 - current_weekday) % 7 or 7,
+            "perşembe": (3 - current_weekday) % 7 or 7,
+            "cuma": (4 - current_weekday) % 7 or 7,
+            "cumartesi": (5 - current_weekday) % 7 or 7,
+            "pazar": (6 - current_weekday) % 7 or 7
+        }
+        
+        # Tarihleri hesapla
+        weekday_dates = {}
+        for day_name, days_ahead in weekdays.items():
+            date = today + timedelta(days=days_ahead)
+            weekday_dates[day_name] = date.strftime("%Y-%m-%d")
+        
         # Sistem talimatlarını güncelleyerek daha net yönlendirmeler ekliyorum
         prompt = ChatPromptTemplate.from_messages([
             ("system", """Sen müşteri hizmetleri taleplerini karşılayan bir asistansın. Uygun aracı çağırarak kullanıcıya yardımcı ol.
@@ -37,12 +64,39 @@ def main():
 Fonksiyon çağırma kuralları:
 - Sipariş durumu sorularında get_order_status kullan
 - E-posta güncelleme için update_user_email kullan
-- Randevu oluşturma için schedule_appointment kullan. Yarın = bugünün tarihi + 1 gün olarak hesaplanır
+- Randevu oluşturma için schedule_appointment kullan.
 - En yakın mağaza sorguları için find_nearest_store kullan ve lokasyon olarak şehir adı belirt
 - Kullanıcının lokasyonu yoksa veya "Your Current Location" çağrısı yapıyorsan, bunun yerine lokasyon için kullanıcıdan bilgi iste
 
-Tarih formatı her zaman YYYY-MM-DD olarak kullan (örn: 2023-05-15).
-Geçersiz bir yanıt verme ve her zaman Türkçe konuş."""),
+Tarih bilgisi:
+- Bugünün tarihi: {today_date}
+- Yarının tarihi: {tomorrow_date}
+- Önümüzdeki/bu/gelecek hafta için tarihler:
+  * Pazartesi: {monday_date}
+  * Salı: {tuesday_date}
+  * Çarşamba: {wednesday_date}
+  * Perşembe: {thursday_date}
+  * Cuma: {friday_date}
+  * Cumartesi: {saturday_date}
+  * Pazar: {sunday_date}
+- Tüm tarihler YYYY-MM-DD formatında kullanılmalıdır
+- "Yarın" ifadesi kullanıldığında {tomorrow_date} tarihini kullan
+- "Bugün" ifadesi kullanıldığında {today_date} tarihini kullan
+- "Bu pazartesi", "önümüzdeki pazartesi" gibi ifadeler için yukarıdaki tarihleri kullan
+- "Önümüzdeki hafta" ifadesinde bir sonraki pazartesi ({monday_date}) olarak kabul et
+- Başka tarihleri hesaplarken de YYYY-MM-DD formatını koruyarak hesapla
+
+Geçersiz bir yanıt verme ve her zaman Türkçe konuş.""".format(
+                today_date=today_str,
+                tomorrow_date=tomorrow_str,
+                monday_date=weekday_dates["pazartesi"],
+                tuesday_date=weekday_dates["salı"],
+                wednesday_date=weekday_dates["çarşamba"],
+                thursday_date=weekday_dates["perşembe"],
+                friday_date=weekday_dates["cuma"],
+                saturday_date=weekday_dates["cumartesi"],
+                sunday_date=weekday_dates["pazar"]
+            )),
             MessagesPlaceholder(variable_name="chat_history", optional=True),
             ("human", "{input}"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -146,12 +200,8 @@ Geçersiz bir yanıt verme ve her zaman Türkçe konuş."""),
                 tomorrow = datetime.now() + timedelta(days=1)
                 tomorrow_str = tomorrow.strftime("%Y-%m-%d")
                 
-                # "Yarın" kelimesinin geçtiği durumlarda tarih dönüşümünü önceden yapalım
-                if "yarın" in prompt.lower():
-                    enhanced_prompt = prompt.lower().replace("yarın", f"yarın ({tomorrow_str})")
-                    logging.info(f"Prompt geliştirildi, yarın tarihi eklendi: {enhanced_prompt}")
-                else:
-                    enhanced_prompt = prompt
+                # Kullanıcının girdisini olduğu gibi kullan, çünkü sistem promptunda zaten tarih bilgisi var
+                enhanced_prompt = prompt
                 
                 # Invoke the agent and get intermediate steps
                 if chat_history_for_agent and isinstance(chat_history_for_agent[-1], HumanMessage):
@@ -166,11 +216,9 @@ Geçersiz bir yanıt verme ve her zaman Türkçe konuş."""),
                 
                 while retry_count <= max_retries:
                     try:
-                        # İlk denemede enhanced_prompt, sonraki denemelerde daha açık talimatlar kullan
-                        current_input = input_for_agent if retry_count == 0 else f"{input_for_agent} (Lütfen bu talebi düzgün bir şekilde işle ve geçerli argümanlarla fonksiyonu çağır. Yarın tarihi bugün + 1 gündür: {tomorrow_str})"
-                        
+                        # Sadeleştirilmiş agent çağrısı
                         result = agent_executor.invoke({
-                            "input": current_input,
+                            "input": input_for_agent,
                             "chat_history": chat_history_for_agent
                         })
                         
@@ -234,10 +282,10 @@ Geçersiz bir yanıt verme ve her zaman Türkçe konuş."""),
                     
 Lütfen talebinizi şu şekilde belirtin:
 - Hangi hizmet için randevu istediğinizi belirtin (örn: "servis randevusu")
-- Tarihi açık bir şekilde belirtin (örn: "yarın" veya "23 Mayıs")
+- Tarihi belirtin (örn: "yarın", "bugün", "önümüzdeki salı" gibi)
 - Saati belirtin (örn: "14:00")
 
-Örnek: "Yarın saat 14:00'te telefon tamiri için randevu almak istiyorum."
+Örnek: "Önümüzdeki salı saat 14:00'te telefon tamiri için randevu almak istiyorum."
                     """
                 elif "Your Current Location" in str(e):
                     error_message = "Özür dilerim, konumunuzu belirtmediğiniz için size en yakın mağazayı bulamadım. Lütfen bulunduğunuz şehir veya semti belirtin. Örnek: 'Ankara'da en yakın mağazanız nerede?'"
