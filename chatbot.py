@@ -27,8 +27,8 @@ def get_order_status(order_id: str) -> Dict[str, Any]:
     logging.info(f"--- API Çağrısı: get_order_status(order_id={order_id}) ---")
     # Mock yanıt
     order_statuses = {
-        "123456": {"status": "Hazırlanıyor", "estimated_delivery": "2023-03-25"},
-        "867530": {"status": "Kargoya Verildi", "estimated_delivery": "2023-03-22", 
+        "123456": {"status": "Hazırlanıyor", "estimated_delivery": "2025-05-15"},
+        "867530": {"status": "Kargoya Verildi", "estimated_delivery": "2025-05-22", 
                  "tracking_number": "TR123456789"},
         # Varsayılan durum
         "default": {"status": "Bulunamadı", "message": "Bu sipariş numarası sistemde bulunamadı."}
